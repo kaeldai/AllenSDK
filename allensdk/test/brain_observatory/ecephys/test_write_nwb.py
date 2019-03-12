@@ -9,7 +9,7 @@ import numpy as np
 
 import allensdk.brain_observatory.ecephys.write_nwb.__main__ as write_nwb
 from allensdk.brain_observatory.ecephys.ecephys_api.ecephys_nwb_api import EcephysNwbApi
-from allensdk.brain_observatory.ecephys import RunningSpeed
+from allensdk.brain_observatory import RunningSpeed
 
 
 @pytest.fixture
