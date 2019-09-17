@@ -41,6 +41,20 @@ from allensdk.brain_observatory.ecephys.file_io.continuous_file import Continuou
 from allensdk.brain_observatory.argschema_utilities import ArgSchemaParserPlus
 from .subsampling import select_channels, subsample_timestamps, subsample_lfp, remove_lfp_offset, remove_lfp_noise
 
+try:
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    MPI_rank = comm.Get_rank()
+    MPI_size = comm.Get_size()
+    barrier = comm.Barrier
+    gather = comm.gather
+except ModuleNotFoundError as e:
+    # Run without mpi4py installed
+    MPI_rank = 0
+    MPI_size = 1
+    barrier = lambda : None
+    gather = lambda data, root: data
+
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +67,10 @@ def subsample(args):
     """
     params = args['lfp_subsampling']
 
-    probe_outputs = []
-    for probe in args['probes']:
+    # distribute the processing of each node to a different core
+    probes_by_rank = args['probes'][MPI_rank::MPI_size]
+    probe_outputs_on_rank = []
+    for probe in probes_by_rank:
         logging.info("Sub-sampling LFP for " + probe['name'])
         lfp_data_file = ContinuousFile(probe['lfp_input_file_path'], probe['lfp_timestamps_input_path'],
                                        probe['total_channels'])
@@ -109,10 +125,25 @@ def subsample(args):
         np.save(probe['lfp_timestamps_path'], ts_subsampled)
         np.save(probe['lfp_channel_info_path'], actual_channels)
 
-        probe_outputs.append({'name': probe['name'],
-                              'lfp_data_path': probe['lfp_data_path'],
-                              'lfp_timestamps_path': probe['lfp_timestamps_path'],
-                              'lfp_channel_info_path': probe['lfp_channel_info_path']})
+        probe_outputs_on_rank.append(
+            {'name': probe['name'],
+             'lfp_data_path': probe['lfp_data_path'],
+             'lfp_timestamps_path': probe['lfp_timestamps_path'],
+             'lfp_channel_info_path': probe['lfp_channel_info_path']
+             }
+        )
+
+    barrier()
+    # Send all the probe info to rank 0 where it will be saved.
+    probe_outputs_all = gather(probe_outputs_on_rank, root=0)
+    probe_outputs = []
+    if MPI_rank == 0:
+        for probes_on_rank in probe_outputs_all:
+            for probe_data in probes_on_rank:
+                probe_outputs.append(probe_data)
+
+    else:
+        probe_outputs = []
 
     return {'probe_outputs': probe_outputs}
 
@@ -120,11 +151,14 @@ def subsample(args):
 def main():
     mod = ArgSchemaParserPlus(schema_type=InputParameters, output_schema_type=OutputParameters)
     output = subsample(mod.args)
-    output.update({"input_parameters": mod.args})
-    if "output_json" in mod.args:
-        mod.output(output, indent=2)
-    else:
-        logger.info(mod.get_output_json(output))
+    if MPI_rank == 0:
+        # Only save the output file on rank 0 so the file isn't being overwritten
+        output.update({"input_parameters": mod.args})
+        if "output_json" in mod.args:
+            mod.output(output, indent=2)
+        else:
+            logger.info(mod.get_output_json(output))
+    barrier()
 
 
 if __name__ == "__main__":
